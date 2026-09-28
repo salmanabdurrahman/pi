@@ -266,12 +266,23 @@ function isUsageSessionEntry(item: RenderSessionItem): item is Extract<SessionEn
 
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
 
-function isDeadTerminalError(error: unknown): boolean {
-	if (!error || typeof error !== "object" || !("code" in error)) {
+export function isDeadTerminalError(error: unknown): boolean {
+	if (!error || typeof error !== "object") {
 		return false;
 	}
-	const code = (error as NodeJS.ErrnoException).code;
-	return code !== undefined && DEAD_TERMINAL_ERROR_CODES.has(code);
+	const code = "code" in error ? (error as NodeJS.ErrnoException).code : undefined;
+	if (code !== undefined && DEAD_TERMINAL_ERROR_CODES.has(code)) {
+		return true;
+	}
+	const message = "message" in error && typeof (error as Error).message === "string" ? (error as Error).message : "";
+	return (
+		message === "read EIO" ||
+		message.startsWith("read EIO") ||
+		message === "write EPIPE" ||
+		message.startsWith("write EPIPE") ||
+		message === "write EIO" ||
+		message.startsWith("write EIO")
+	);
 }
 
 export function formatCrashExtensionHint(extensionMatches: readonly string[] | undefined): string | undefined {
@@ -4199,6 +4210,9 @@ export class InteractiveMode {
 	 * paste / Kitty / modifyOtherKeys sequences.
 	 */
 	private uncaughtCrash(error: Error): never {
+		if (isDeadTerminalError(error)) {
+			this.emergencyTerminalExit();
+		}
 		if (this.isShuttingDown) {
 			process.exit(1);
 		}
@@ -4254,9 +4268,14 @@ export class InteractiveMode {
 		const terminalErrorHandler = (error: Error) => {
 			if (isDeadTerminalError(error)) {
 				this.emergencyTerminalExit();
+				return;
 			}
 			throw error;
 		};
+		if (process.stdin) {
+			process.stdin.on("error", terminalErrorHandler);
+			this.signalCleanupHandlers.push(() => process.stdin.off("error", terminalErrorHandler));
+		}
 		process.stdout.on("error", terminalErrorHandler);
 		process.stderr.on("error", terminalErrorHandler);
 		this.signalCleanupHandlers.push(() => process.stdout.off("error", terminalErrorHandler));
